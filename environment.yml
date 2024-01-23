@@ -1,0 +1,16 @@
+name: msc
+channels:
+  - conda-forge
+  - nvidia
+  - pyg
+  - pytorch
+  - defaults
+dependencies:
+  - pyg
+  - pyscipopt
+  - pytorch
+  - pytorch-cuda
+  - ipykernel
+  - pandas
+  - matplotlib
+prefix: /home/bruno/miniconda3/envs/msc
