@@ -56,6 +56,8 @@ class ModelWithPrimalDualCurves(Model):
 def load_model(mps_file) -> Model:
     model = ModelWithPrimalDualCurves()
 
+    model.hideOutput(True)
+
     model.readProblem(str(mps_file))
 
     return model
