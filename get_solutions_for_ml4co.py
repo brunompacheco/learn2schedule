@@ -1,7 +1,9 @@
 from pathlib import Path
+import numpy as np
 
-from pyscipopt import Model
 from tqdm import tqdm
+
+from src.problem import load_model
 
 
 if __name__ == '__main__':
@@ -16,12 +18,10 @@ if __name__ == '__main__':
     # Iterate over each instance file
     for instance_file in tqdm(instance_files):
         # Load the instance into a SCIP model
-        model = Model()
-        model.hideOutput(True)
-        model.readProblem(str(instance_file))
+        model = load_model(str(instance_file))
 
         # Set the time limit and ensure at most 500 solutions are collected
-        model.setRealParam('limits/time', 60.0)
+        model.setRealParam('limits/time', 5*60.0)
         model.setIntParam('limits/maxsol', 500)
         model.setBoolParam('constraints/countsols/collect', True)
 
@@ -32,3 +32,11 @@ if __name__ == '__main__':
         for i, sol in enumerate(model.getSols()):
             sol_filename = instance_file.name.replace('.mps.gz', f'_{i}.sol')
             model.writeSol(sol, str(output_dir/sol_filename))
+
+        # Save the primal/dual bound curve
+        curve_filename = instance_file.name.replace('.mps.gz', f'_bounds.npz')
+        primal_t, primal_x = model.get_primal_curve()
+        dual_t, dual_x = model.get_dual_curve()
+
+        np.savez(output_dir/curve_filename, primal_t=primal_t,
+                 primal_x=primal_x, dual_t=dual_t, dual_x=dual_x)
