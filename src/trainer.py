@@ -33,9 +33,9 @@ class Trainer(ABC):
         random_seed: if not None (default = 42), fixes randomness for Python,
         NumPy as PyTorch (makes trainig reproducible).
     """
-    def __init__(self, net: nn.Module, dataset: Dataset, epochs=5, lr= 0.1,
-                 batch_size=2**4, optimizer: str = 'Adam',
-                 optimizer_params=dict(), loss_func: str = 'MSELoss',
+    def __init__(self, net: nn.Module, train_dataset: Dataset, val_dataset=None,
+                 epochs=5, lr= 0.1, batch_size=2**4, optimizer: str = 'Adam',
+                 optimizer_params=dict(), loss_func: str = 'BCEWithLogitsLoss',
                  loss_func_params=dict(), lr_scheduler: str = None,
                  lr_scheduler_params=dict(), mixed_precision=True,
                  device=None, wandb_project=None, wandb_group=None, logger=None,
@@ -56,7 +56,8 @@ class Trainer(ABC):
         self.batch_size = batch_size
 
         self.net = net.to(self.device)
-        self.dataset = dataset
+        self.train_dataset = train_dataset
+        self.val_dataset = val_dataset
         self.optimizer = optimizer
         self.optimizer_params = optimizer_params
         self.loss_func = loss_func
@@ -82,7 +83,7 @@ class Trainer(ABC):
             random.seed(random_seed)
             torch.manual_seed(random_seed)
 
-        self.best_val = float('inf')
+        self.best_score = float('inf')
 
         self._log_to_wandb = False if wandb_project is None else True
         self.wandb_project = wandb_project
@@ -157,8 +158,8 @@ class Trainer(ABC):
             random_seed=wandb.config['random_seed'],
         )
 
-        if 'best_val' in checkpoint.keys():
-            self.best_val = checkpoint['best_val']
+        if 'best_score' in checkpoint.keys():
+            self.best_score = checkpoint['best_score']
 
         self._e = checkpoint['epoch'] + 1
 
@@ -245,20 +246,14 @@ class Trainer(ABC):
         self.l.info(f"Wandb set up. Run ID: {self._id}")
 
     def prepare_data(self):
-        """Splits dataset into training and validation data. Instantiate loaders.
+        """Instantiate loaders.
         """
-        generator = torch.Generator().manual_seed(33)
+        train_loader = DataLoader(self.train_dataset, self.batch_size, shuffle=True)
 
-        train_size = int(0.8 * len(self.dataset))
-        val_size = len(self.dataset) - train_size
-        train_data, val_data = torch.utils.data.random_split(
-            self.dataset,
-            (train_size, val_size),
-            generator=generator
-        )
-
-        train_loader = DataLoader(train_data, self.batch_size, shuffle=True)
-        val_loader = DataLoader(val_data, self.batch_size, shuffle=False)
+        if self.val_dataset is not None:
+            val_loader = DataLoader(self.val_dataset, self.batch_size, shuffle=False)
+        else:
+            val_loader = None
 
         return train_loader, val_loader
 
@@ -272,31 +267,39 @@ class Trainer(ABC):
 
     def _run_epoch(self):
         # train
-        train_time, (train_losses, train_times) = timeit(self.train_pass)()
+        self.net.train()
+        train_time, (train_losses, train_times) = timeit(self.data_pass)(self.train_data, train=True)
 
         self.l.info(f"Training pass took {train_time:.3f} seconds")
         self.l.info(f"Training loss = {train_losses['all']}")
 
-        # validation
-        val_time, (val_losses, val_times) = timeit(self.validation_pass)()
-
-        self.l.info(f"Validation pass took {val_time:.3f} seconds")
-        self.l.info(f"Validation loss = {val_losses['all']}")
-
         data_to_log = {
             "train_loss": train_losses['all'],
-            "val_loss": val_losses['all'],
             "train_time": train_time,
-            "val_time": val_time,
         }
+
         self._add_data_to_log(train_losses, 'train_loss_', data_to_log)
-        self._add_data_to_log(val_losses, 'val_loss_', data_to_log)
         self._add_data_to_log(train_times, 'train_time_', data_to_log)
-        self._add_data_to_log(val_times, 'val_time_', data_to_log)
 
-        val_score = val_losses['all']  # defines best model
+        # validation
+        if self.val_dataset is not None:
+            self.net.eval()
+            val_time, (val_losses, val_times) = timeit(self.data_pass)(self.val_data, train=False)
 
-        return data_to_log, val_score
+            self.l.info(f"Validation pass took {val_time:.3f} seconds")
+            self.l.info(f"Validation loss = {val_losses['all']}")
+
+
+            data_to_log["val_loss"] = val_losses['all']
+            data_to_log["val_time"] = val_time
+            self._add_data_to_log(val_losses, 'val_loss_', data_to_log)
+            self._add_data_to_log(val_times, 'val_time_', data_to_log)
+
+            score = val_losses['all']  # defines best model
+        else:
+            score = train_losses['all']  # defines best model
+
+        return data_to_log, score
 
     def run(self) -> nn.Module:
         if not self._is_initalized:
@@ -306,7 +309,7 @@ class Trainer(ABC):
             self.l.info(f"Epoch {self._e} started ({self._e+1}/{self.epochs})")
             epoch_start_time = time()
 
-            data_to_log, val_score = self._run_epoch()
+            data_to_log, score = self._run_epoch()
 
             if self._log_to_wandb:
                 wandb.log(data_to_log, step=self._e, commit=True)
@@ -315,12 +318,12 @@ class Trainer(ABC):
                     self.l.info(f"Saving checkpoint")
                     self.save_checkpoint()
 
-            if val_score < self.best_val:
+            if score < self.best_score:
                 if self._log_to_wandb:
                     self.l.info(f"Saving best model")
                     self.save_model(name='model_best')
 
-                self.best_val = val_score
+                self.best_score = score
 
             epoch_end_time = time()
             self.l.info(
@@ -329,7 +332,7 @@ class Trainer(ABC):
             )
 
             if self.max_loss is not None:
-                if val_score > self.max_loss:
+                if score > self.max_loss:
                     break
 
             self._e += 1
@@ -357,7 +360,7 @@ class Trainer(ABC):
         return backward_time
     
     def get_loss_and_metrics(self, y_hat, y, validation=False):
-        loss_time, loss =  timeit(self._loss_func)(y_hat.view_as(y), y)
+        loss_time, loss =  timeit(self._loss_func)(y_hat.view_as(y), y.to(y_hat))
 
         metrics = None
         if validation:
@@ -423,18 +426,10 @@ class Trainer(ABC):
 
         return losses, times
 
-    def train_pass(self):
-        self.net.train()
-        return self.data_pass(self.train_data, train=True)
-
-    def validation_pass(self):
-        self.net.eval()
-        return self.data_pass(self.val_data, train=False)
-
     def save_checkpoint(self):
         checkpoint = {
             'epoch': self._e,
-            'best_val': self.best_val,
+            'best_score': self.best_score,
             'model_state_dict': self.net.state_dict(),
             'optimizer_state_dict': self._optim.state_dict(),
         }
